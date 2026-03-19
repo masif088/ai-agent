@@ -117,11 +117,15 @@ export default function ContentPlannersPage() {
   const [generateLoading, setGenerateLoading] = useState(false);
   const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<string | null>(null);
+  const [filterStatus, setFilterStatus] = useState<string | null>(null);
+  const [filterPlatform, setFilterPlatform] = useState<string | null>(null);
+  const [platformOptions, setPlatformOptions] = useState<string[]>([]);
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importCompanyId, setImportCompanyId] = useState<string | null>(null);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
+  const [deleteFilteredLoading, setDeleteFilteredLoading] = useState(false);
   const [exportHeaders, setExportHeaders] = useState<
     { key: string; label: string; include: boolean }[]
   >(() =>
@@ -142,6 +146,8 @@ export default function ContentPlannersPage() {
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [selectedImageTemplateId, setSelectedImageTemplateId] = useState<string | null>(null);
+  const [generateImageAlso, setGenerateImageAlso] = useState(false);
 
   function openExportModal() {
     setExportHeaders(
@@ -208,7 +214,8 @@ export default function ContentPlannersPage() {
     if (!supabase) return;
     fetchPlanners();
     fetchCompanies();
-  }, [supabase, selectedCompany]);
+    fetchPlatformOptions();
+  }, [supabase, selectedCompany, filterStatus, filterPlatform]);
 
   async function fetchCompanies() {
     if (!supabase) return;
@@ -217,6 +224,16 @@ export default function ContentPlannersPage() {
       .select("id, name")
       .order("name");
     setCompanies(data ?? []);
+  }
+
+  async function fetchPlatformOptions() {
+    if (!supabase) return;
+    const { data } = await supabase
+      .from("content_planners")
+      .select("platform")
+      // .not("platform", "is", null);
+    const unique = [...new Set((data ?? []).map((r) => r.platform).filter(Boolean))].sort() as string[];
+    setPlatformOptions(unique);
   }
 
   async function fetchPlanners() {
@@ -234,6 +251,12 @@ export default function ContentPlannersPage() {
 
     if (selectedCompany) {
       query = query.eq("company_id", selectedCompany);
+    }
+    if (filterStatus) {
+      query = query.eq("status", filterStatus);
+    }
+    if (filterPlatform) {
+      query = query.eq("platform", filterPlatform);
     }
 
     const { data, error } = await query;
@@ -383,6 +406,8 @@ export default function ContentPlannersPage() {
       return;
     }
     setSelectedTemplateId(null);
+    setSelectedImageTemplateId(null);
+    setGenerateImageAlso(false);
     setGenerateModalOpen(true);
     if (supabase) {
       const { data } = await supabase
@@ -414,9 +439,45 @@ export default function ContentPlannersPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Generate failed");
-      message.success(
-        `${json.generated ?? 0} content(s) generated successfully with OpenAI`
-      );
+      const generated = json.generated ?? 0;
+      message.success(generated > 0 ? `${generated} content(s) generated successfully` : "Generate completed");
+
+      if (generateImageAlso && generated > 0) {
+        const plannerIds = draftPlanners.map((p) => p.id);
+        const { data: results } = await supabase
+          .from("ai_results")
+          .select("id, planner_id, result_image_prompt")
+          .in("planner_id", plannerIds)
+          .order("created_at", { ascending: false });
+
+        const seen = new Set<string>();
+        const resultsWithPrompt = (results ?? []).filter((r) => {
+          if (!r.result_image_prompt?.trim()) return false;
+          if (seen.has(r.planner_id)) return false;
+          seen.add(r.planner_id);
+          return true;
+        });
+        let imageCount = 0;
+        for (const r of resultsWithPrompt) {
+          try {
+            const imgRes = await fetch("/api/content-planners/generate-image", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                resultId: r.id,
+                templateId: selectedImageTemplateId || undefined,
+              }),
+            });
+            if (imgRes.ok) imageCount++;
+          } catch {
+            // continue with next
+          }
+        }
+        if (imageCount > 0) {
+          message.success(`${imageCount} image(s) generated`);
+        }
+      }
+
       setGenerateModalOpen(false);
       setSelectedRowKeys([]);
       fetchPlanners();
@@ -446,6 +507,29 @@ export default function ContentPlannersPage() {
       message.error("Bulk delete failed: " + (err?.message ?? "Unknown error"));
     } finally {
       setBulkDeleteLoading(false);
+    }
+  }
+
+  const hasFilter = !!(selectedCompany || filterStatus || filterPlatform);
+  async function handleDeleteFiltered() {
+    if (!supabase || planners.length === 0) return;
+    setDeleteFilteredLoading(true);
+    try {
+      const ids = planners.map((p) => p.id);
+      const { error } = await supabase
+        .from("content_planners")
+        .delete()
+        .in("id", ids);
+      if (error) throw error;
+      message.success(`${ids.length} planner(s) deleted successfully`);
+      setSelectedRowKeys([]);
+      fetchPlanners();
+      fetchPlatformOptions();
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      message.error("Delete filtered failed: " + (err?.message ?? "Unknown error"));
+    } finally {
+      setDeleteFilteredLoading(false);
     }
   }
 
@@ -569,12 +653,37 @@ export default function ContentPlannersPage() {
           <Select
             placeholder="Filter company"
             allowClear
-            style={{ width: 200 }}
+            style={{ width: 180 }}
+            value={selectedCompany ?? undefined}
             onChange={(v) => setSelectedCompany(v ?? null)}
           >
             {companies.map((c) => (
               <Select.Option key={c.id} value={c.id}>
                 {c.name}
+              </Select.Option>
+            ))}
+          </Select>
+          <Select
+            placeholder="Filter status"
+            allowClear
+            style={{ width: 140 }}
+            value={filterStatus ?? undefined}
+            onChange={(v) => setFilterStatus(v ?? null)}
+          >
+            <Select.Option value="draft">Draft</Select.Option>
+            <Select.Option value="generated">Generated</Select.Option>
+            <Select.Option value="published">Published</Select.Option>
+          </Select>
+          <Select
+            placeholder="Filter platform"
+            allowClear
+            style={{ width: 160 }}
+            value={filterPlatform ?? undefined}
+            onChange={(v) => setFilterPlatform(v ?? null)}
+          >
+            {platformOptions.map((p) => (
+              <Select.Option key={p} value={p}>
+                {p}
               </Select.Option>
             ))}
           </Select>
@@ -608,6 +717,23 @@ export default function ContentPlannersPage() {
               disabled={selectedRowKeys.length === 0}
             >
               Bulk Delete {selectedRowKeys.length > 0 ? `(${selectedRowKeys.length})` : ""}
+            </Button>
+          </Popconfirm>
+          <Popconfirm
+            title="Delete filtered planners?"
+            description={`${planners.length} planner(s) matching current filters will be deleted. Related AI prompts and results will also be removed.`}
+            onConfirm={handleDeleteFiltered}
+            okText="Delete"
+            cancelText="Cancel"
+            okButtonProps={{ danger: true }}
+          >
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              loading={deleteFilteredLoading}
+              disabled={!hasFilter || planners.length === 0}
+            >
+              Delete filtered ({planners.length})
             </Button>
           </Popconfirm>
           <Button
@@ -706,6 +832,32 @@ export default function ContentPlannersPage() {
                 label: `${t.template_type ?? "Untitled"}${t.companies?.name ? ` (${t.companies.name})` : ""}`,
               }))}
             />
+          </div>
+          <div>
+            <Checkbox
+              checked={generateImageAlso}
+              onChange={(e) => setGenerateImageAlso(e.target.checked)}
+            >
+              Also generate images (optional)
+            </Checkbox>
+            <p className="text-xs text-slate-500 mt-1">Generate images from result_image_prompt after content generation</p>
+            {generateImageAlso && (
+              <div className="mt-3">
+                <label className="block text-sm font-medium text-slate-700 mb-2">Image template (optional)</label>
+                <Select
+                  placeholder="Select template for image generation"
+                  allowClear
+                  style={{ width: "100%" }}
+                  value={selectedImageTemplateId ?? undefined}
+                  onChange={(v) => setSelectedImageTemplateId(v ?? null)}
+                  optionLabelProp="label"
+                  options={templates.map((t) => ({
+                    value: t.id,
+                    label: `${t.template_type ?? "Untitled"}${t.companies?.name ? ` (${t.companies.name})` : ""}`,
+                  }))}
+                />
+              </div>
+            )}
           </div>
         </div>
       </Modal>
