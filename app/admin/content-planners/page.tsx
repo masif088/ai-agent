@@ -389,7 +389,7 @@ export default function ContentPlannersPage() {
         .from("templates")
         .select("id, company_id, template_type, template_content, companies(name)")
         .order("template_type");
-      setTemplates((data as Template[]) ?? []);
+      setTemplates((data as unknown as Template[]) ?? []);
     }
   }
 
