@@ -1,0 +1,92 @@
+companies
+id
+name
+description
+brand_voice
+target_audience
+tone
+created_at
+updated_at
+
+knowledge_base
+id
+company_id
+title
+content
+type (product / guideline / tone / faq / etc)
+embedding (optional)
+embedding_vector (optional)
+created_at
+updated_at
+
+content_planners
+id
+company_id
+week
+platform
+division
+post_type
+post_title
+content_description
+hashtags
+status (draft / generated / published)
+target_location
+goal
+keywords
+created_at
+updated_at
+
+ai_prompts
+id
+planner_id
+company_id
+prompt
+created_at
+updated_at
+
+ai_results
+id
+planner_id
+result_text
+result_caption
+result_image_prompt
+created_at
+updated_at
+
+templates
+id
+company_id
+template_type
+template_content
+created_at
+updated_at
+
+---
+TEMPLATE VARIABLES (placeholders {{variable}})
+---
+Use format {{variable_name}} in template_content.
+Variables are replaced at generate/export time.
+
+**From content_planners:**
+  post_title         - Post title
+  content_description - Content description
+  platform           - Platform (Instagram, TikTok, etc)
+  division           - Division
+  post_type          - Post type
+  hashtags           - Hashtags
+  target_location    - Target location
+  goal               - Content goal
+  keywords           - Keywords
+  week               - Week (date)
+
+**From companies (via planner):**
+  company_name       - Company name
+  brand_voice        - Brand voice
+  target_audience    - Target audience
+  tone               - Communication tone
+
+**From ai_results:**
+  result_text        - Main content text (from AI)
+  result_caption     - Social media caption (from AI)
+  result_image_prompt - Prompt for AI image generation (for template type image)
+                        Consumed when generating image from AI.
