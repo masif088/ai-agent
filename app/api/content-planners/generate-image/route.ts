@@ -67,7 +67,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const company = planner.companies as Record<string, string> | null;
+  const company = planner.companies as unknown as Record<string, string> | null;
 
   const basePrompt = aiResult.result_image_prompt?.trim();
   if (!basePrompt) {
@@ -192,7 +192,7 @@ export async function POST(request: NextRequest) {
   }
 
   const companyId = planner.company_id;
-  const company = planner.companies as Record<string, string> | null;
+  const company = planner.companies as unknown as Record<string, string> | null;
 
   const basePrompt = aiResult.result_image_prompt?.trim();
   if (!basePrompt) {
@@ -261,7 +261,7 @@ export async function POST(request: NextRequest) {
     );
 
     const imageUrls = responses
-      .map((r) => r.data[0]?.url)
+      .map((r) => r.data?.[0]?.url)
       .filter((url): url is string => !!url);
 
     if (imageUrls.length === 0) {
