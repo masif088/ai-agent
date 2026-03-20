@@ -13,19 +13,25 @@ import {
   Select,
   Popconfirm,
   Collapse,
-  Alert,
+  Upload,
+  Avatar,
 } from "antd";
-import { PlusOutlined, EditOutlined, DeleteOutlined } from "@ant-design/icons";
+import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined } from "@ant-design/icons";
 import { createClient } from "@/lib/supabase/client";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+const TEMPLATE_IMAGES_BUCKET = "template-images";
+
 type Company = { id: string; name: string };
+
+type TemplateImage = { url: string; label: string };
 
 type Template = {
   id: string;
   company_id: string | null;
   template_type: string | null;
   template_content: string | null;
+  template_images?: TemplateImage[] | null;
   created_at: string;
   updated_at: string;
   companies?: { name: string } | null;
@@ -47,6 +53,8 @@ export default function TemplatesPage() {
   const [form] = Form.useForm<TemplateFormValues>();
   const [submitLoading, setSubmitLoading] = useState(false);
   const [selectedCompany, setSelectedCompany] = useState<string | null>(null);
+  const [templateImages, setTemplateImages] = useState<TemplateImage[]>([]);
+  const [imageUploading, setImageUploading] = useState(false);
 
   useEffect(() => {
     setSupabase(createClient());
@@ -96,6 +104,7 @@ export default function TemplatesPage() {
 
   function openCreateModal() {
     setEditingId(null);
+    setTemplateImages([]);
     form.setFieldsValue({
       company_id: null,
       template_type: "",
@@ -106,12 +115,41 @@ export default function TemplatesPage() {
 
   function openEditModal(record: Template) {
     setEditingId(record.id);
+    const imgs = record.template_images;
+    setTemplateImages(Array.isArray(imgs) ? imgs : []);
     form.setFieldsValue({
       company_id: record.company_id ?? undefined,
       template_type: record.template_type ?? "",
       template_content: record.template_content ?? "",
     });
     setModalOpen(true);
+  }
+
+  async function handleImageUpload(file: File, label: string) {
+    if (!supabase || !editingId) return;
+    setImageUploading(true);
+    try {
+      const ext = file.name.split(".").pop()?.toLowerCase() || "png";
+      const path = `${editingId}/${Date.now()}-${label.replace(/\s+/g, "-") || "image"}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from(TEMPLATE_IMAGES_BUCKET)
+        .upload(path, file, { contentType: file.type, upsert: true });
+      if (uploadError) throw uploadError;
+      const { data: urlData } = supabase.storage
+        .from(TEMPLATE_IMAGES_BUCKET)
+        .getPublicUrl(path);
+      setTemplateImages((prev) => [...prev, { url: urlData.publicUrl, label }]);
+      message.success("Image uploaded");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      message.error("Upload failed: " + (err?.message ?? "Unknown error"));
+    } finally {
+      setImageUploading(false);
+    }
+  }
+
+  function removeTemplateImage(idx: number) {
+    setTemplateImages((prev) => prev.filter((_, i) => i !== idx));
   }
 
   async function handleSubmit(values: TemplateFormValues) {
@@ -122,6 +160,7 @@ export default function TemplatesPage() {
         company_id: values.company_id || null,
         template_type: values.template_type.trim() || null,
         template_content: values.template_content.trim() || null,
+        template_images: templateImages.length > 0 ? templateImages : null,
       };
 
       if (editingId) {
@@ -179,6 +218,18 @@ export default function TemplatesPage() {
       key: "template_content",
       ellipsis: true,
       render: (v: string) => (v ? (v.length > 80 ? v.slice(0, 80) + "..." : v) : "-"),
+    },
+    {
+      title: "Images",
+      dataIndex: "template_images",
+      key: "template_images",
+      width: 80,
+      render: (imgs: TemplateImage[] | null) =>
+        Array.isArray(imgs) && imgs.length > 0 ? (
+          <span className="text-slate-600">{imgs.length} image(s)</span>
+        ) : (
+          "-"
+        ),
     },
     {
       title: "Actions",
@@ -315,6 +366,12 @@ export default function TemplatesPage() {
                         <code className="bg-slate-100 px-1 rounded">{`{{result_image_prompt}}`}</code> — for template type <strong>image</strong>, used when generating AI image
                       </div>
                     </div>
+                    <div>
+                      <div className="font-semibold text-slate-700 mb-1">Reference Images</div>
+                      <div className="text-slate-600 text-xs">
+                        Add logos or reference images below. They are sent to the AI when generating content (vision).
+                      </div>
+                    </div>
                   </div>
                 ),
               },
@@ -330,6 +387,49 @@ export default function TemplatesPage() {
               rows={8}
               placeholder="Use placeholders e.g. {{post_title}}, {{result_text}}, {{result_image_prompt}} for image."
             />
+          </Form.Item>
+
+          <Form.Item label="Reference images (optional)">
+            <p className="text-xs text-slate-500 mb-2">
+              Add logos or reference images. They will be sent to AI when generating content.
+            </p>
+            {editingId ? (
+              <div className="space-y-3">
+                {templateImages.map((img, idx) => (
+                  <div key={idx} className="flex items-center gap-3 p-2 bg-slate-50 rounded">
+                    <Avatar src={img.url} shape="square" size={48} />
+                    <Input
+                      placeholder="Label (e.g. Logo)"
+                      value={img.label}
+                      onChange={(e) =>
+                        setTemplateImages((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, label: e.target.value } : x))
+                        )
+                      }
+                      className="flex-1 max-w-[180px]"
+                    />
+                    <Button type="text" danger size="small" onClick={() => removeTemplateImage(idx)}>
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                <Upload
+                  showUploadList={false}
+                  accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                  beforeUpload={(file) => {
+                    handleImageUpload(file, "Reference image");
+                    return false;
+                  }}
+                  disabled={imageUploading}
+                >
+                  <Button icon={<UploadOutlined />} loading={imageUploading}>
+                    Add image
+                  </Button>
+                </Upload>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400">Save the template first, then edit to add images.</p>
+            )}
           </Form.Item>
         </Form>
       </Modal>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import OpenAI from "openai";
+import sharp from "sharp";
 
 export const dynamic = "force-dynamic";
 
@@ -229,44 +230,49 @@ export async function POST(request: NextRequest) {
   }
 
   let finalPrompt = basePrompt;
+  let templateImages: { url: string; label: string }[] = [];
   if (templateId) {
     const { data: template } = await supabase
       .from("templates")
-      .select("template_content")
+      .select("template_content, template_images")
       .eq("id", templateId)
       .single();
 
     if (template?.template_content) {
       finalPrompt = replaceTemplateVars(String(template.template_content));
     }
+    const imgs = template?.template_images;
+    templateImages = Array.isArray(imgs) ? imgs.filter((i) => i?.url) : [];
   }
 
   const openai = new OpenAI({ apiKey });
   const IMAGE_COUNT = 1;
+  const logoUrl = templateImages[0]?.url;
 
   try {
     console.log("finalPrompt", finalPrompt);
-    // DALL-E 3 only supports n=1, so we make 4 parallel calls
+
     const responses = await Promise.all(
       Array.from({ length: IMAGE_COUNT }, () =>
         openai.images.generate({
-          model: "dall-e-3",
+          model: "gpt-image-1.5",
           prompt: finalPrompt,
           n: 1,
-          size: "1024x1024",
-          response_format: "url",
-          quality: "standard",
+          quality: "high",
         })
       )
     );
 
-    const imageUrls = responses
-      .map((r) => r.data?.[0]?.url)
-      .filter((url): url is string => !!url);
+    const imageDataList = responses
+      .map((r) => r.data?.[0])
+      .filter((item): item is NonNullable<typeof item> => !!item);
+    let base64List = imageDataList
+      .map((item) => ("b64_json" in item ? item.b64_json : null))
+      .filter((b): b is string => !!b);
 
-    if (imageUrls.length === 0) {
+    if (base64List.length === 0) {
       return NextResponse.json(
-        { error: "No image URLs returned from OpenAI" },
+        { error: "No image data returned from OpenAI" },
         { status: 500 }
       );
     }
@@ -282,11 +288,39 @@ export async function POST(request: NextRequest) {
     const timestamp = Date.now();
     const storedUrls: string[] = [];
 
-    for (let i = 0; i < imageUrls.length; i++) {
-      let url = imageUrls[i];
+    for (let i = 0; i < base64List.length; i++) {
+      let finalUrl = "";
       try {
-        const imageRes = await fetch(url);
-        const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
+        let imageBuffer = Buffer.from(base64List[i], "base64");
+
+        if (logoUrl) {
+          try {
+            const baseImage = sharp(imageBuffer);
+            const meta = await baseImage.metadata();
+            const baseW = meta.width ?? 1024;
+            const baseH = meta.height ?? 1024;
+            const logoMaxSize = Math.min(baseW, baseH) * 0.25;
+            const padding = Math.round(Math.min(baseW, baseH) * 0.03);
+
+            const logoRes = await fetch(logoUrl);
+            if (logoRes.ok) {
+              const logoBuffer = Buffer.from(await logoRes.arrayBuffer());
+              const logoResized = await sharp(logoBuffer)
+                .resize(Math.round(logoMaxSize), Math.round(logoMaxSize), { fit: "inside" })
+                .png()
+                .toBuffer();
+
+              const composited = await baseImage
+                .composite([{ input: logoResized, top: padding, left: padding }])
+                .png()
+                .toBuffer();
+              imageBuffer = Buffer.from(composited);
+            }
+          } catch (overlayErr) {
+            console.error("Logo overlay failed, using base image:", overlayErr);
+          }
+        }
+
         const fileName = `${aiResult.planner_id}/${resultId}-${timestamp}-${i}.png`;
 
         const { data: uploadData, error: uploadError } = await storageClient.storage
@@ -300,12 +334,19 @@ export async function POST(request: NextRequest) {
           const { data: urlData } = storageClient.storage
             .from(BUCKET)
             .getPublicUrl(uploadData.path);
-          url = urlData.publicUrl;
+          finalUrl = urlData.publicUrl;
         }
       } catch (storageErr) {
         console.error(`Storage upload failed for image ${i}:`, storageErr);
       }
-      storedUrls.push(url);
+      if (finalUrl) storedUrls.push(finalUrl);
+    }
+
+    if (storedUrls.length === 0) {
+      return NextResponse.json(
+        { error: "Image generation succeeded but storage upload failed" },
+        { status: 500 }
+      );
     }
 
     const resultImageUrl =
@@ -326,7 +367,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Save to ai_prompts for history
-    const imagePromptText = `[Image Generation - DALL-E 3 x${storedUrls.length}]\n${finalPrompt}`;
+    const imagePromptText = `[Image Generation - GPT Image 1.5 x${storedUrls.length}]\n${finalPrompt}`;
     const { error: promptError } = await supabase.from("ai_prompts").insert({
       planner_id: aiResult.planner_id,
       company_id: companyId,

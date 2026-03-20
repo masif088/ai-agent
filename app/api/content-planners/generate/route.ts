@@ -66,13 +66,16 @@ export async function POST(request: NextRequest) {
   }
 
   let templateContent: string | null = null;
+  let templateImages: { url: string; label: string }[] = [];
   if (templateId) {
     const { data: t } = await supabase
       .from("templates")
-      .select("template_content")
+      .select("template_content, template_images")
       .eq("id", templateId)
       .single();
     templateContent = t?.template_content ?? null;
+    const imgs = t?.template_images;
+    templateImages = Array.isArray(imgs) ? imgs.filter((i) => i?.url) : [];
   }
 
   const openai = new OpenAI({ apiKey });
@@ -92,7 +95,7 @@ export async function POST(request: NextRequest) {
           .join("\n")
       : "";
 
-    const prompt = `
+    const promptText = `
 ${templateContent}
 
 Respon dalam format JSON saja:
@@ -102,13 +105,25 @@ Respon dalam format JSON saja:
   "result_image_prompt": "A detailed visual description used to generate an AI image. It should clearly describe the scene, environment, people, lighting, mood, composition, and style so the AI can produce a high-quality and relevant image."
 }`;
 
+    const imageHint =
+      templateImages.length > 0
+        ? `\n\n[Reference images attached: ${templateImages.map((i) => i.label || "Image").join(", ")}. Use them as context for brand style, logo, or visual reference.]`
+        : "";
+
+    const contentParts: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [
+      { type: "text" as const, text: promptText + imageHint },
+    ];
+    for (const img of templateImages) {
+      contentParts.push({ type: "image_url" as const, image_url: { url: img.url } });
+    }
+
     try {
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "user",
-            content: prompt,
+            content: contentParts,
           },
         ],
         response_format: { type: "json_object" },
@@ -126,7 +141,7 @@ Respon dalam format JSON saja:
       await supabase.from("ai_prompts").insert({
         planner_id: planner.id,
         company_id: planner.company_id,
-        prompt,
+        prompt: promptText,
       });
 
       await supabase.from("ai_results").insert({
